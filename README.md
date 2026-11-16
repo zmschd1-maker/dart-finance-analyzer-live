@@ -5,7 +5,8 @@
 
 ## 라이브
 
-- 사이트: (배포 후 기재)
+- 사이트: https://dart-finance-analyzer-live.vercel.app
+- Vercel 프로젝트: `zmschd1-maker/dart-finance-analyzer-live` (Hobby · 서울 리전 icn1)
 
 ## 구조
 
