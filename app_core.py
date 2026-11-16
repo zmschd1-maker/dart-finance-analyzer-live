@@ -1496,40 +1496,64 @@ async function fetchNews(keyword) {
 # 백엔드 핵심 로직 (에러 홀딩 및 봇 우회 탑재)
 # ─────────────────────────────────────────
 
-def ask_gemini_ai(prompt):
-    target_model = "models/gemini-1.5-flash"
+def _gemini_model_candidates():
+    """현재 Gemini API에서 실제로 응답하는 모델 후보를 고른다.
+    (2026년 이후 gemini-1.5/2.5 계열이 신규 사용자에게 404로 막혀 있어 최신 모델을 우선 시도)"""
+    # 무료 등급에서 응답이 빠르고 안정적인 lite 계열을 먼저, flash 계열을 다음 후보로 둔다.
+    preferred = ['gemini-flash-lite-latest', 'gemini-3.1-flash-lite', 'gemini-3.5-flash-lite',
+                 'gemini-3.8-flash', 'gemini-flash-latest', 'gemini-3.5-flash']
     try:
-        list_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={GEMINI_API_KEY}"
+        list_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={GEMINI_API_KEY}&pageSize=200"
         with urllib.request.urlopen(urllib.request.Request(list_url), timeout=10) as resp:
             models_data = json.loads(resp.read())
-            blacklist = ['robotics', 'preview', 'experimental', 'deprecated', 'tuning', 'embed', 'vision', 'aqa']
-            available_models = [m['name'] for m in models_data.get('models', []) if 'generateContent' in m.get('supportedGenerationMethods', []) and 'gemini' in m['name'].lower() and not any(b in m['name'].lower() for b in blacklist)]
-            if available_models:
-                target_model = next((m for m in available_models if '1.5-flash' in m), None) or next((m for m in available_models if 'pro' in m), available_models[0])
-    except: pass
+        names = [m['name'].split('/')[-1] for m in models_data.get('models', [])
+                 if 'generateContent' in m.get('supportedGenerationMethods', [])]
+        candidates = [m for m in preferred if m in names]
+        if candidates:
+            return candidates
+        # 후보가 없으면 목록에서 flash 계열 → 그 외 순으로 하나 고른다
+        fallback = [n for n in names if 'gemini' in n and 'flash' in n and 'image' not in n
+                    and 'tts' not in n and 'preview' not in n and 'lite' not in n]
+        fallback += [n for n in names if 'gemini' in n and 'flash' in n and 'image' not in n
+                     and 'tts' not in n and 'preview' not in n]
+        return fallback[:4] or preferred
+    except Exception:
+        return preferred
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/{target_model}:generateContent?key={GEMINI_API_KEY}"
-    payload = {"contents": [{"parts": [{"text": prompt}]}]}
-    req = urllib.request.Request(url, data=json.dumps(payload).encode('utf-8'), headers={'Content-Type': 'application/json'}, method='POST')
-    
-    for attempt in range(6): 
-        try:
-            with urllib.request.urlopen(req, timeout=90) as resp:
-                res_json = json.loads(resp.read())
-                reply = res_json['candidates'][0]['content']['parts'][0]['text']
-                clean_reply = re.sub(r',\s*([\]}])', r'\1', reply)
-                return {'status': '000', 'advice': clean_reply}
-        except urllib.error.HTTPError as e:
-            if e.code in [503, 429] and attempt < 5:
-                time.sleep(2 + (attempt * 3)) 
-                continue
-            err_body = e.read().decode("utf-8")
-            return {'status': 'error', 'message': f'HTTP {e.code}: {err_body}'}
-        except Exception as e:
-            if attempt < 5:
-                time.sleep(3)
-                continue
-            return {'status': 'error', 'message': str(e)}
+
+def ask_gemini_ai(prompt):
+    last_error = None
+    deadline = time.time() + 45   # 서버리스 실행 시간(60초) 안에서 여러 모델을 순차 시도
+    for target_model in _gemini_model_candidates():
+        if time.time() > deadline:
+            break
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{target_model}:generateContent?key={GEMINI_API_KEY}"
+        payload = {"contents": [{"parts": [{"text": prompt}]}]}
+        req = urllib.request.Request(url, data=json.dumps(payload).encode('utf-8'),
+                                    headers={'Content-Type': 'application/json'}, method='POST')
+        for attempt in range(2):
+            try:
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    res_json = json.loads(resp.read())
+                    reply = res_json['candidates'][0]['content']['parts'][0]['text']
+                    clean_reply = re.sub(r',\s*([\]}])', r'\1', reply)
+                    return {'status': '000', 'advice': clean_reply}
+            except urllib.error.HTTPError as e:
+                body = e.read().decode('utf-8', 'replace')
+                last_error = f'HTTP {e.code}: {body}'
+                if e.code == 404:
+                    break   # 이 모델은 사용 불가 → 다음 모델
+                if e.code in (429, 503) and attempt == 0 and time.time() < deadline:
+                    time.sleep(2 + attempt * 2)
+                    continue
+                break
+            except Exception as e:
+                last_error = str(e)
+                if attempt == 0 and time.time() < deadline:
+                    time.sleep(2)
+                    continue
+                break
+    return {'status': 'error', 'message': last_error or 'Gemini 응답을 받지 못했습니다.'}
 
 
 # ═══════════════════════════════════════════════════════════════
