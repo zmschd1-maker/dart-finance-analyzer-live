@@ -59,6 +59,10 @@ def _cache_get(key):
     return None
 
 def _cache_set(key, value):
+    # 오류 응답은 캐시하지 않는다.
+    # (서버리스에서 KIS 토큰 발급이 잠깐 실패했을 때 그 오류가 10분간 고정되지 않도록)
+    if isinstance(value, dict) and value.get('error'):
+        return
     _CACHE[key] = (time.time(), value)
 
 _RATE_LIMIT = {}
@@ -2434,14 +2438,22 @@ def get_kis_token():
     url = f"{KIS_BASE_URL}/oauth2/tokenP"
     body = json.dumps({'grant_type': 'client_credentials', 'appkey': KIS_APP_KEY, 'appsecret': KIS_APP_SECRET}).encode('utf-8')
     req = urllib.request.Request(url, data=body, headers={'Content-Type': 'application/json'}, method='POST')
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read())
-        KIS_TOKEN['token'] = data.get('access_token')
-        KIS_TOKEN['expires_at'] = now + int(data.get('expires_in', 86400))
-        return KIS_TOKEN['token']
-    except Exception:
-        return None
+    last_err = None
+    # KIS는 앱키당 접근토큰 발급을 1분에 1회로 제한한다.
+    # 서버리스는 인스턴스마다 토큰을 새로 받으므로 일시적 실패를 한 번 더 시도한다.
+    for attempt in range(2):
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read())
+            KIS_TOKEN['token'] = data.get('access_token')
+            KIS_TOKEN['expires_at'] = now + int(data.get('expires_in', 86400))
+            return KIS_TOKEN['token']
+        except Exception as e:
+            last_err = e
+            if attempt == 0:
+                time.sleep(2)
+    print(f"[시스템] KIS 토큰 발급 실패: {last_err}")
+    return None
 
 def get_kis_stock_price(stock_code):
     token = get_kis_token()
