@@ -1,0 +1,9 @@
+[project]
+name = "dart-finance-analyzer-live"
+version = "1.0.0"
+description = "DART 재무제표 분석기 — Vercel 배포판 (원본 UI/기능 유지)"
+requires-python = ">=3.12"
+dependencies = []
+
+[tool.vercel]
+entrypoint = "wsgi:app"
